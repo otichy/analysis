@@ -2455,10 +2455,6 @@ prediction_color_input_id <- function(variable, level) {
   paste0("pred_level_color__", encode_prediction_input_piece(variable), "__", encode_prediction_input_piece(level))
 }
 
-prediction_color_commit_input_id <- function(variable, level) {
-  paste0("pred_level_color_commit__", encode_prediction_input_piece(variable), "__", encode_prediction_input_piece(level))
-}
-
 prediction_level_order_input_id <- function(variable) {
   paste0("pred_level_order__", encode_prediction_input_piece(variable))
 }
@@ -2506,6 +2502,43 @@ prediction_plot_color_spec <- function(pred, level_colors = list()) {
 
 format_prediction_percent <- function(x, digits = 1L) {
   paste0(formatC(100 * as.numeric(x), format = "f", digits = digits), "%")
+}
+
+save_plot_svg <- function(plot, filename, width = 9, height = 5.5) {
+  grDevices::svg(filename = filename, width = width, height = height, onefile = TRUE)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  print(plot)
+  invisible(TRUE)
+}
+
+prediction_observed_point_shape <- function(use_cross = TRUE) {
+  if (isTRUE(use_cross)) 4 else 16
+}
+
+prediction_observed_point_color <- function() {
+  "#666666"
+}
+
+prediction_observed_point_position <- function(x, width, dodge_width = NULL, jitter = TRUE, seed = 1L) {
+  if (!is.factor(x)) {
+    if (!is.null(dodge_width)) return(ggplot2::position_dodge(width = dodge_width))
+    return(ggplot2::position_identity())
+  }
+
+  if (isTRUE(jitter)) {
+    if (!is.null(dodge_width)) {
+      return(ggplot2::position_jitterdodge(
+        jitter.width = width * 0.08,
+        jitter.height = 0,
+        dodge.width = dodge_width,
+        seed = seed
+      ))
+    }
+    return(ggplot2::position_jitter(width = width * 0.08, height = 0, seed = seed))
+  }
+
+  if (!is.null(dodge_width)) return(ggplot2::position_dodge(width = dodge_width))
+  ggplot2::position_identity()
 }
 
 prediction_plot_row_colors <- function(data, color_spec) {
@@ -2798,6 +2831,100 @@ make_prediction_observed_label_data <- function(observed_data, offset = 0.015) {
   out
 }
 
+add_prediction_observed_labels <- function(
+  p,
+  observed_label_data,
+  position = ggplot2::position_identity(),
+  group_var = ".group",
+  size = 2.5
+) {
+  if (is.null(observed_label_data) || !is.data.frame(observed_label_data) || nrow(observed_label_data) == 0) {
+    return(p)
+  }
+
+  label_aes <- if (identical(group_var, ".label_group")) {
+    aes(x = .x, y = .label_y, label = .point_label, group = .label_group)
+  } else {
+    aes(x = .x, y = .label_y, label = .point_label, group = .group)
+  }
+
+  if (requireNamespace("ggrepel", quietly = TRUE)) {
+    return(p + ggrepel::geom_text_repel(
+      data = observed_label_data,
+      mapping = label_aes,
+      position = position,
+      size = size,
+      color = "black",
+      min.segment.length = 0,
+      segment.color = "#999999",
+      segment.size = 0.25,
+      box.padding = 0.18,
+      point.padding = 0.12,
+      max.overlaps = Inf,
+      show.legend = FALSE,
+      inherit.aes = FALSE
+    ))
+  }
+
+  p + geom_text(
+    data = observed_label_data,
+    mapping = label_aes,
+    position = position,
+    size = size,
+    vjust = 0,
+    alpha = 0.9,
+    color = "black",
+    check_overlap = TRUE,
+    show.legend = FALSE,
+    inherit.aes = FALSE
+  )
+}
+
+make_prediction_observed_hover_text <- function(observed_data, pred = NULL, response_info = NULL) {
+  if (is.null(observed_data) || !is.data.frame(observed_data) || nrow(observed_data) == 0) {
+    return(character(0))
+  }
+
+  x_var <- if (!is.null(pred) && ".x_var" %in% names(pred)) unique(as.character(pred$.x_var))[1] else "x"
+  group_var <- if (!is.null(pred) && ".group_var" %in% names(pred)) unique(as.character(pred$.group_var))[1] else "Group"
+  response_info <- normalize_response_info(response_info)
+  prob_label <- if (response_is_multinomial(response_info) && ".outcome" %in% names(observed_data)) {
+    paste("Observed probability of", as.character(observed_data$.outcome))
+  } else {
+    rep(paste("Observed probability of", response_info$success_label %||% "success"), nrow(observed_data))
+  }
+
+  x_val <- if (x_var %in% names(observed_data)) {
+    as.character(observed_data[[x_var]])
+  } else {
+    as.character(observed_data$.x)
+  }
+  lemma <- observed_data$.point_label %||% rep(NA_character_, nrow(observed_data))
+  lemma[is.na(lemma) | !nzchar(lemma)] <- "(unlabeled)"
+
+  parts <- Map(function(i) {
+    out <- c(
+      paste0("Lemma: ", lemma[[i]]),
+      paste0(x_var, ": ", x_val[[i]])
+    )
+    if (!identical(group_var, "None") && ".group" %in% names(observed_data)) {
+      out <- c(out, paste0(group_var, ": ", as.character(observed_data$.group[[i]])))
+    }
+    if (".outcome" %in% names(observed_data)) {
+      out <- c(out, paste0("Outcome: ", as.character(observed_data$.outcome[[i]])))
+    }
+    if (".obs_n" %in% names(observed_data) && ".obs_total" %in% names(observed_data)) {
+      out <- c(out, paste0("Observed count: ", format(observed_data$.obs_n[[i]], big.mark = ","), " / ", format(observed_data$.obs_total[[i]], big.mark = ",")))
+    } else if ("plural_successes" %in% names(observed_data) && ".obs_total" %in% names(observed_data)) {
+      out <- c(out, paste0("Observed count: ", format(observed_data$plural_successes[[i]], big.mark = ","), " / ", format(observed_data$.obs_total[[i]], big.mark = ",")))
+    }
+    out <- c(out, paste0(prob_label[[i]], ": ", format_prediction_percent(observed_data$.obs_prob[[i]])))
+    paste(out, collapse = "<br>")
+  }, seq_len(nrow(observed_data)))
+
+  unlist(parts, use.names = FALSE)
+}
+
 restore_observed_prediction_data <- function(model_df, raw_df, res, dataset_filters = list()) {
   if (!is.data.frame(model_df)) return(model_df)
 
@@ -2838,7 +2965,9 @@ build_multinomial_prediction_plot <- function(
   level_colors = list(),
   show_labels = FALSE,
   observed_data = NULL,
-  show_observed_points = FALSE
+  show_observed_points = FALSE,
+  observed_point_jitter = TRUE,
+  observed_point_cross = TRUE
 ) {
   x_var <- unique(pred$.x_var)[1]
   group_var <- unique(pred$.group_var)[1]
@@ -2846,6 +2975,8 @@ build_multinomial_prediction_plot <- function(
   if (!(chart_type %in% c("line", "bar", "violin"))) chart_type <- "line"
   show_labels <- isTRUE(show_labels)
   show_observed_points <- isTRUE(show_observed_points) && identical(chart_type %in% c("bar", "violin"), TRUE)
+  observed_point_jitter <- isTRUE(observed_point_jitter)
+  observed_point_shape <- prediction_observed_point_shape(observed_point_cross)
 
   has_group <- !identical(group_var, "None") && length(unique(as.character(pred$.group))) > 1L
   outcome_levels <- if (is.factor(pred$.outcome)) levels(pred$.outcome) else unique(as.character(pred$.outcome))
@@ -2861,6 +2992,8 @@ build_multinomial_prediction_plot <- function(
     observed_plot_data <- make_prediction_observed_data(observed_data, pred)
     if (is.null(observed_plot_data) || nrow(observed_plot_data) == 0) {
       show_observed_points <- FALSE
+    } else {
+      observed_plot_data$.hover_text <- make_prediction_observed_hover_text(observed_plot_data, pred, response_info)
     }
   }
 
@@ -2892,24 +3025,21 @@ build_multinomial_prediction_plot <- function(
         )
       }
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = bar_span * 0.08,
-            jitter.height = 0,
-            dodge.width = bar_span,
-            seed = 1
-          )
-        } else {
-          dodge
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          dodge_width = bar_span,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .group),
+            aes(x = .x, y = .obs_prob, group = .group, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -2949,24 +3079,21 @@ build_multinomial_prediction_plot <- function(
         )
       }
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = violin_width * 0.08,
-            jitter.height = 0,
-            dodge.width = violin_width,
-            seed = 1
-          )
-        } else {
-          dodge
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          dodge_width = violin_width,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .group),
+            aes(x = .x, y = .obs_prob, group = .group, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3056,24 +3183,21 @@ build_multinomial_prediction_plot <- function(
         )
       }
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = bar_span * 0.08,
-            jitter.height = 0,
-            dodge.width = bar_span,
-            seed = 1
-          )
-        } else {
-          dodge
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          dodge_width = bar_span,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .outcome),
+            aes(x = .x, y = .obs_prob, group = .outcome, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3112,24 +3236,21 @@ build_multinomial_prediction_plot <- function(
         )
       }
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = violin_width * 0.08,
-            jitter.height = 0,
-            dodge.width = violin_width,
-            seed = 1
-          )
-        } else {
-          dodge
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          dodge_width = violin_width,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .outcome),
+            aes(x = .x, y = .obs_prob, group = .outcome, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3201,16 +3322,13 @@ build_multinomial_prediction_plot <- function(
       } else {
         as.character(observed_label_data$.outcome)
       }
-      p <- p +
-        geom_text(
-          data = observed_label_data,
-          aes(x = .x, y = .label_y, label = .point_label, group = .label_group),
-          position = point_label_position %||% ggplot2::position_identity(),
-          size = 2.7,
-          color = "black",
-          show.legend = FALSE,
-          inherit.aes = FALSE
-        )
+      p <- add_prediction_observed_labels(
+        p,
+        observed_label_data,
+        position = point_label_position %||% ggplot2::position_identity(),
+        group_var = ".label_group",
+        size = 2.7
+      )
     }
   }
 
@@ -3231,7 +3349,9 @@ build_prediction_plot <- function(
   level_colors = list(),
   show_labels = FALSE,
   observed_data = NULL,
-  show_observed_points = FALSE
+  show_observed_points = FALSE,
+  observed_point_jitter = TRUE,
+  observed_point_cross = TRUE
 ) {
   x_var <- unique(pred$.x_var)[1]
   group_var <- unique(pred$.group_var)[1]
@@ -3244,7 +3364,9 @@ build_prediction_plot <- function(
       level_colors = level_colors,
       show_labels = show_labels,
       observed_data = observed_data,
-      show_observed_points = show_observed_points
+      show_observed_points = show_observed_points,
+      observed_point_jitter = observed_point_jitter,
+      observed_point_cross = observed_point_cross
     ))
   }
   color_spec <- prediction_plot_color_spec(pred, level_colors = level_colors)
@@ -3262,11 +3384,15 @@ build_prediction_plot <- function(
   if (!(chart_type %in% c("line", "bar", "violin"))) chart_type <- "line"
   show_labels <- isTRUE(show_labels)
   show_observed_points <- isTRUE(show_observed_points) && identical(chart_type %in% c("bar", "violin"), TRUE)
+  observed_point_jitter <- isTRUE(observed_point_jitter)
+  observed_point_shape <- prediction_observed_point_shape(observed_point_cross)
 
   if (show_observed_points) {
     observed_plot_data <- make_prediction_observed_data(observed_data, pred)
     if (is.null(observed_plot_data) || nrow(observed_plot_data) == 0) {
       show_observed_points <- FALSE
+    } else {
+      observed_plot_data$.hover_text <- make_prediction_observed_hover_text(observed_plot_data, pred, response_info)
     }
   }
 
@@ -3291,24 +3417,21 @@ build_prediction_plot <- function(
           color = "gray20"
         )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = bar_span * 0.08,
-            jitter.height = 0,
-            dodge.width = bar_span,
-            seed = 1
-          )
-        } else {
-          dodge
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          dodge_width = bar_span,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .group),
+            aes(x = .x, y = .obs_prob, group = .group, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3332,21 +3455,22 @@ build_prediction_plot <- function(
         geom_errorbar(
           aes(ymin = prob_low, ymax = prob_high),
           width = err_width
-        )
+      )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitter(width = bar_span * 0.08, height = 0, seed = 1)
-        } else {
-          ggplot2::position_identity()
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob),
+            aes(x = .x, y = .obs_prob, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3367,21 +3491,22 @@ build_prediction_plot <- function(
           aes(ymin = prob_low, ymax = prob_high),
           width = err_width,
           color = single_color
-        )
+      )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitter(width = bar_span * 0.08, height = 0, seed = 1)
-        } else {
-          ggplot2::position_identity()
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob),
+            aes(x = .x, y = .obs_prob, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3424,24 +3549,21 @@ build_prediction_plot <- function(
           linewidth = 0.35
         )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitterdodge(
-            jitter.width = violin_width * 0.08,
-            jitter.height = 0,
-            dodge.width = violin_width,
-            seed = 1
-          )
-        } else {
-          ggplot2::position_identity()
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          dodge_width = violin_width,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .group),
+            aes(x = .x, y = .obs_prob, group = .group, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3493,21 +3615,22 @@ build_prediction_plot <- function(
           data = pred,
           aes(x = .x, ymin = prob_low, ymax = prob_high, color = .x, group = .x),
           linewidth = 0.35
-        )
+      )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitter(width = violin_width * 0.08, height = 0, seed = 1)
-        } else {
-          ggplot2::position_identity()
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob),
+            aes(x = .x, y = .obs_prob, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3547,19 +3670,20 @@ build_prediction_plot <- function(
           color = single_color
         )
       if (show_observed_points) {
-        point_position <- if (is.factor(pred$.x)) {
-          ggplot2::position_jitter(width = violin_width * 0.08, height = 0, seed = 1)
-        } else {
-          ggplot2::position_identity()
-        }
+        point_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          jitter = observed_point_jitter
+        )
         p <- p +
           geom_point(
             data = observed_plot_data,
-            aes(x = .x, y = .obs_prob, group = .group),
+            aes(x = .x, y = .obs_prob, group = .group, text = .hover_text),
             position = point_position,
-            size = 1.85,
+            shape = observed_point_shape,
+            size = if (identical(observed_point_shape, 4)) 2.2 else 1.85,
             alpha = 0.72,
-            color = "black",
+            color = prediction_observed_point_color(),
             show.legend = FALSE,
             inherit.aes = FALSE
           )
@@ -3640,45 +3764,43 @@ build_prediction_plot <- function(
   if (show_observed_points && show_labels) {
     observed_label_data <- make_prediction_observed_label_data(observed_plot_data)
     if (nrow(observed_label_data) > 0) {
-      if (identical(chart_type, "bar") && identical(color_spec$mode, "group") && is.factor(pred$.x)) {
-        point_label_position <- ggplot2::position_jitterdodge(
-          jitter.width = bar_span * 0.08,
-          jitter.height = 0,
-          dodge.width = bar_span,
-          seed = 1
-        )
-      } else if (identical(chart_type, "bar") && identical(color_spec$mode, "group")) {
-        point_label_position <- dodge
-      } else if (identical(chart_type, "violin") && identical(color_spec$mode, "group") && is.factor(pred$.x)) {
-        point_label_position <- ggplot2::position_jitterdodge(
-          jitter.width = violin_width * 0.08,
-          jitter.height = 0,
-          dodge.width = violin_width,
-          seed = 1
+      if (identical(chart_type, "bar") && identical(color_spec$mode, "group")) {
+        point_label_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          dodge_width = bar_span,
+          jitter = observed_point_jitter
         )
       } else if (identical(chart_type, "violin") && identical(color_spec$mode, "group")) {
-        point_label_position <- dodge
+        point_label_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          dodge_width = violin_width,
+          jitter = observed_point_jitter
+        )
       } else if (identical(chart_type, "bar") && is.factor(pred$.x)) {
-        point_label_position <- ggplot2::position_jitter(width = bar_span * 0.08, height = 0, seed = 1)
+        point_label_position <- prediction_observed_point_position(
+          pred$.x,
+          bar_span,
+          jitter = observed_point_jitter
+        )
       } else if (identical(chart_type, "violin") && is.factor(pred$.x)) {
-        point_label_position <- ggplot2::position_jitter(width = violin_width * 0.08, height = 0, seed = 1)
+        point_label_position <- prediction_observed_point_position(
+          pred$.x,
+          violin_width,
+          jitter = observed_point_jitter
+        )
       } else {
         point_label_position <- ggplot2::position_identity()
       }
 
-      p <- p +
-        geom_text(
-          data = observed_label_data,
-          aes(x = .x, y = .label_y, label = .point_label, group = .group),
-          position = point_label_position,
-          size = 2.5,
-          vjust = 0,
-          alpha = 0.9,
-          color = "black",
-          check_overlap = TRUE,
-          show.legend = FALSE,
-          inherit.aes = FALSE
-        )
+      p <- add_prediction_observed_labels(
+        p,
+        observed_label_data,
+        position = point_label_position,
+        group_var = ".group",
+        size = 2.5
+      )
     }
   }
 
@@ -3878,6 +4000,9 @@ normalize_app_settings_store <- function(settings = list()) {
     pred_chart_type = pred_chart_type,
     pred_show_labels = isTRUE(settings$pred_show_labels),
     pred_show_observed_points = isTRUE(settings$pred_show_observed_points),
+    pred_observed_jitter = isTRUE(settings$pred_observed_jitter %||% TRUE),
+    pred_observed_cross = isTRUE(settings$pred_observed_cross %||% TRUE),
+    pred_interactive_hover = isTRUE(settings$pred_interactive_hover),
     pred_level_orders = normalize_prediction_level_order_store(settings$pred_level_orders %||% list()),
     pred_level_colors = normalize_prediction_level_color_store(settings$pred_level_colors %||% list())
   )
@@ -3921,6 +4046,9 @@ build_saved_fit_state <- function(
   pred_chart_type,
   pred_show_labels = FALSE,
   pred_show_observed_points = FALSE,
+  pred_observed_jitter = TRUE,
+  pred_observed_cross = TRUE,
+  pred_interactive_hover = FALSE,
   pred_level_orders = list(),
   pred_level_colors = list(),
   dataset_filters = list(),
@@ -3948,6 +4076,9 @@ build_saved_fit_state <- function(
     pred_chart_type = pred_chart_type %||% "line",
     pred_show_labels = isTRUE(pred_show_labels),
     pred_show_observed_points = isTRUE(pred_show_observed_points),
+    pred_observed_jitter = isTRUE(pred_observed_jitter %||% TRUE),
+    pred_observed_cross = isTRUE(pred_observed_cross %||% TRUE),
+    pred_interactive_hover = isTRUE(pred_interactive_hover),
     pred_level_orders = pred_level_orders %||% list(),
     pred_level_colors = pred_level_colors %||% list(),
     dataset_filters = normalize_dataset_filters(dataset_filters)
@@ -4142,10 +4273,15 @@ build_repro_code <- function(
         "resolve_prediction_palette",
         "prediction_plot_color_spec",
         "format_prediction_percent",
+        "prediction_observed_point_shape",
+        "prediction_observed_point_color",
+        "prediction_observed_point_position",
         "prediction_plot_row_colors",
         "make_prediction_label_data",
         "make_prediction_observed_data",
         "make_prediction_observed_label_data",
+        "add_prediction_observed_labels",
+        "make_prediction_observed_hover_text",
         "build_multinomial_prediction_plot",
         "build_prediction_plot"
       ),
@@ -4413,6 +4549,9 @@ ui <- fluidPage(
         ),
         tabPanel(
           "Fixed Effects",
+          downloadButton("download_coef_plot_svg", "Download fixed-effects plot (.svg)"),
+          tags$br(),
+          tags$br(),
           DTOutput("fixed_effects_table"),
           plotOutput("coef_plot", height = 360)
         ),
@@ -4425,9 +4564,10 @@ ui <- fluidPage(
           "Predictions",
           uiOutput("pred_controls_ui"),
           downloadButton("download_pred_plot", "Download prediction plot (.png)"),
+          downloadButton("download_pred_plot_svg", "Download prediction plot (.svg)"),
           tags$br(),
           tags$br(),
-          plotOutput("pred_plot", height = 420),
+          uiOutput("pred_plot_ui"),
           tags$hr(),
           uiOutput("individual_pred_plots_ui"),
           tags$hr(),
@@ -4527,6 +4667,9 @@ server <- function(input, output, session) {
       pred_chart_type = input$pred_chart_type %||% "line",
       pred_show_labels = isTRUE(input$pred_show_labels),
       pred_show_observed_points = isTRUE(input$pred_show_observed_points),
+      pred_observed_jitter = isTRUE(input$pred_observed_jitter %||% TRUE),
+      pred_observed_cross = isTRUE(input$pred_observed_cross %||% TRUE),
+      pred_interactive_hover = isTRUE(input$pred_interactive_hover),
       pred_level_orders = prediction_level_orders_state(),
       pred_level_colors = prediction_level_colors_state()
     ))
@@ -4570,6 +4713,9 @@ server <- function(input, output, session) {
     pred_chart_type = input$pred_chart_type %||% "line",
     pred_show_labels = input$pred_show_labels %||% FALSE,
     pred_show_observed_points = input$pred_show_observed_points %||% FALSE,
+    pred_observed_jitter = input$pred_observed_jitter %||% TRUE,
+    pred_observed_cross = input$pred_observed_cross %||% TRUE,
+    pred_interactive_hover = input$pred_interactive_hover %||% FALSE,
     pred_level_orders = prediction_level_orders_state(),
     pred_level_colors = prediction_level_colors_state(),
     dataset_filters = dataset_filters_state(),
@@ -4587,6 +4733,9 @@ server <- function(input, output, session) {
           pred_chart_type = pred_chart_type,
           pred_show_labels = pred_show_labels,
           pred_show_observed_points = pred_show_observed_points,
+          pred_observed_jitter = pred_observed_jitter,
+          pred_observed_cross = pred_observed_cross,
+          pred_interactive_hover = pred_interactive_hover,
           pred_level_orders = pred_level_orders,
           pred_level_colors = pred_level_colors,
           dataset_filters = dataset_filters,
@@ -4810,6 +4959,9 @@ server <- function(input, output, session) {
     updateSelectInput(session, "multinom_catcov", selected = as.character(settings$multinom_catcov %||% "single"))
     updateNumericInput(session, "multinom_maxit", value = settings$multinom_maxit %||% 25)
     updateCheckboxInput(session, "compute_lrt", value = isTRUE(settings$compute_lrt))
+    updateCheckboxInput(session, "pred_observed_jitter", value = isTRUE(settings$pred_observed_jitter %||% TRUE))
+    updateCheckboxInput(session, "pred_observed_cross", value = isTRUE(settings$pred_observed_cross %||% TRUE))
+    updateCheckboxInput(session, "pred_interactive_hover", value = isTRUE(settings$pred_interactive_hover))
   }
 
   session$onFlushed(function() {
@@ -4943,6 +5095,9 @@ server <- function(input, output, session) {
       updateRadioButtons(session, "pred_chart_type", selected = state$pred_chart_type %||% "line")
       updateCheckboxInput(session, "pred_show_labels", value = isTRUE(state$pred_show_labels))
       updateCheckboxInput(session, "pred_show_observed_points", value = isTRUE(state$pred_show_observed_points))
+      updateCheckboxInput(session, "pred_observed_jitter", value = isTRUE(state$pred_observed_jitter %||% TRUE))
+      updateCheckboxInput(session, "pred_observed_cross", value = isTRUE(state$pred_observed_cross %||% TRUE))
+      updateCheckboxInput(session, "pred_interactive_hover", value = isTRUE(state$pred_interactive_hover))
     }, once = TRUE)
 
     loaded_settings <- normalize_app_settings_store(list(
@@ -4969,6 +5124,9 @@ server <- function(input, output, session) {
       pred_chart_type = state$pred_chart_type %||% "line",
       pred_show_labels = isTRUE(state$pred_show_labels),
       pred_show_observed_points = isTRUE(state$pred_show_observed_points),
+      pred_observed_jitter = isTRUE(state$pred_observed_jitter %||% TRUE),
+      pred_observed_cross = isTRUE(state$pred_observed_cross %||% TRUE),
+      pred_interactive_hover = isTRUE(state$pred_interactive_hover),
       pred_level_orders = prediction_level_orders_state(),
       pred_level_colors = prediction_level_colors_state()
     ))
@@ -5388,6 +5546,9 @@ server <- function(input, output, session) {
       input$pred_chart_type,
       input$pred_show_labels,
       input$pred_show_observed_points,
+      input$pred_observed_jitter,
+      input$pred_observed_cross,
+      input$pred_interactive_hover,
       prediction_level_orders_state(),
       prediction_level_colors_state()
     )
@@ -6134,7 +6295,7 @@ server <- function(input, output, session) {
     )
   })
 
-  output$coef_plot <- renderPlot({
+  coefficient_plot <- function() {
     if (is.null(fit_result())) {
       validate(need(FALSE, "No model yet. Click 'Fit / Refit model'."))
     }
@@ -6161,6 +6322,10 @@ server <- function(input, output, session) {
       p <- p + facet_wrap(~ outcome, scales = "free_y")
     }
     p
+  }
+
+  output$coef_plot <- renderPlot({
+    coefficient_plot()
   })
 
   output$pred_controls_ui <- renderUI({
@@ -6203,6 +6368,9 @@ server <- function(input, output, session) {
       ),
       checkboxInput("pred_show_labels", "Show value labels", value = FALSE),
       checkboxInput("pred_show_observed_points", "Show observed datapoints per lemma", value = FALSE),
+      checkboxInput("pred_observed_jitter", "Jitter observed datapoints horizontally", value = TRUE),
+      checkboxInput("pred_observed_cross", "Show observed datapoints as crosses", value = TRUE),
+      checkboxInput("pred_interactive_hover", "Use interactive hover labels", value = FALSE),
       tags$hr(),
       uiOutput("pred_color_controls_ui")
     )
@@ -6250,7 +6418,6 @@ server <- function(input, output, session) {
             style = "display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.45rem;",
             lapply(levels_v, function(level) {
               input_id <- prediction_color_input_id(v, level)
-              commit_input_id <- prediction_color_commit_input_id(v, level)
               level_color <- unname(color_state[[v]][level])
               tags$div(
                 `data-level` = level,
@@ -6279,11 +6446,9 @@ server <- function(input, output, session) {
                   tags$button(
                     type = "button",
                     class = "btn btn-default btn-xs",
-                    onclick = sprintf(
-                      "var el = document.getElementById('%s'); if (el && window.Shiny && Shiny.setInputValue) { el.setAttribute('value', el.value); Shiny.setInputValue('%s', {color: el.value, nonce: Date.now()}, {priority: 'event'}); }",
-                      input_id,
-                      commit_input_id
-                    ),
+                    `data-variable` = v,
+                    `data-level` = level,
+                    onclick = "var el = this.parentElement.querySelector('input[type=\"color\"]'); if (el && window.Shiny && Shiny.setInputValue) { el.setAttribute('value', el.value); Shiny.setInputValue('prediction_color_commit', {variable: this.dataset.variable, level: this.dataset.level, color: el.value, nonce: Date.now()}, {priority: 'event'}); }",
                     "OK"
                   )
                 )
@@ -6342,19 +6507,19 @@ server <- function(input, output, session) {
     }
   })
 
-  observe({
+  observeEvent(input$prediction_color_commit, {
     specs <- prediction_level_specs()
-    updated <- prediction_level_colors_state()
-    for (v in names(specs)) {
-      for (level in specs[[v]]) {
-        color_commit <- input[[prediction_color_commit_input_id(v, level)]]
-        color_val <- if (is.list(color_commit)) color_commit$color else color_commit
-        if (!is.null(color_val) && is_valid_hex_color(color_val)) {
-          if (is.null(updated[[v]])) updated[[v]] <- character(0)
-          updated[[v]][level] <- color_val
-        }
-      }
+    color_commit <- input$prediction_color_commit %||% list()
+    v <- as.character(color_commit$variable %||% "")
+    level <- as.character(color_commit$level %||% "")
+    color_val <- as.character(color_commit$color %||% "")
+    if (!v %in% names(specs) || !level %in% as.character(specs[[v]]) || !is_valid_hex_color(color_val)) {
+      return(invisible(NULL))
     }
+
+    updated <- prediction_level_colors_state()
+    if (is.null(updated[[v]])) updated[[v]] <- character(0)
+    updated[[v]][level] <- color_val
     updated <- normalize_prediction_level_colors(
       specs,
       merge_prediction_level_color_store(
@@ -6366,7 +6531,7 @@ server <- function(input, output, session) {
     if (!identical(updated, prediction_level_colors_state())) {
       prediction_level_colors_state(updated)
     }
-  })
+  }, ignoreInit = TRUE)
 
   pred_data <- reactive({
     if (is.null(fit_result())) return(NULL)
@@ -6405,7 +6570,7 @@ server <- function(input, output, session) {
     pred_list[!vapply(pred_list, is.null, logical(1))]
   })
 
-  observeEvent(list(input$pred_x, input$pred_group, input$pred_chart_type, input$pred_show_labels, input$pred_show_observed_points), {
+  observeEvent(list(input$pred_x, input$pred_group, input$pred_chart_type, input$pred_show_labels, input$pred_show_observed_points, input$pred_observed_jitter, input$pred_observed_cross, input$pred_interactive_hover), {
     res <- fit_result()
     if (is.null(res) || !is.null(res$error)) return(invisible(NULL))
     persist_fit_state(res = res)
@@ -6488,7 +6653,9 @@ server <- function(input, output, session) {
             level_colors = prediction_level_colors_state(),
             show_labels = input$pred_show_labels %||% FALSE,
             observed_data = observed_prediction_data,
-            show_observed_points = input$pred_show_observed_points %||% FALSE
+            show_observed_points = input$pred_show_observed_points %||% FALSE,
+            observed_point_jitter = input$pred_observed_jitter %||% TRUE,
+            observed_point_cross = input$pred_observed_cross %||% TRUE
           ) +
             labs(title = paste("Predictions for", x_var))
 
@@ -6612,6 +6779,9 @@ server <- function(input, output, session) {
         pred_chart_type = input$pred_chart_type %||% "line",
         pred_show_labels = input$pred_show_labels %||% FALSE,
         pred_show_observed_points = input$pred_show_observed_points %||% FALSE,
+        pred_observed_jitter = input$pred_observed_jitter %||% TRUE,
+        pred_observed_cross = input$pred_observed_cross %||% TRUE,
+        pred_interactive_hover = input$pred_interactive_hover %||% FALSE,
         pred_level_orders = prediction_level_orders_state(),
         pred_level_colors = prediction_level_colors_state(),
         dataset_filters = dataset_filters_state(),
@@ -6628,6 +6798,19 @@ server <- function(input, output, session) {
     }
   )
 
+  output$download_coef_plot_svg <- downloadHandler(
+    filename = function() {
+      paste0("glmm_fixed_effects_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".svg")
+    },
+    content = function(file) {
+      res <- fit_result()
+      if (is.null(res) || !is.null(res$error)) {
+        stop("Fit a model successfully before downloading the fixed-effects plot.")
+      }
+      save_plot_svg(coefficient_plot(), file, width = 9, height = 5.5)
+    }
+  )
+
   output$download_pred_plot <- downloadHandler(
     filename = function() {
       paste0("glmm_prediction_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".png")
@@ -6638,22 +6821,9 @@ server <- function(input, output, session) {
         stop("Fit a model successfully before downloading the prediction plot.")
       }
 
-      pred <- pred_data()
-      if (is.null(pred)) {
-        stop("Prediction plot is not available for the current variable selection.")
-      }
-
       ggplot2::ggsave(
         filename = file,
-        plot = build_prediction_plot(
-          pred,
-          response_info = res$response_info %||% attr(res$data, "response_info"),
-          chart_type = input$pred_chart_type %||% "line",
-          level_colors = prediction_level_colors_state(),
-          show_labels = input$pred_show_labels %||% FALSE,
-          observed_data = attr(res$data, "observed_prediction_data"),
-          show_observed_points = input$pred_show_observed_points %||% FALSE
-        ),
+        plot = main_prediction_plot(),
         device = "png",
         width = 9,
         height = 5.5,
@@ -6663,7 +6833,21 @@ server <- function(input, output, session) {
     }
   )
 
-  output$pred_plot <- renderPlot({
+  output$download_pred_plot_svg <- downloadHandler(
+    filename = function() {
+      paste0("glmm_prediction_plot_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".svg")
+    },
+    content = function(file) {
+      res <- fit_result()
+      if (is.null(res) || !is.null(res$error)) {
+        stop("Fit a model successfully before downloading the prediction plot.")
+      }
+
+      save_plot_svg(main_prediction_plot(), file, width = 9, height = 5.5)
+    }
+  )
+
+  main_prediction_plot <- function() {
     if (is.null(fit_result())) {
       validate(need(FALSE, "No model yet. Click 'Fit / Refit model'."))
     }
@@ -6679,9 +6863,34 @@ server <- function(input, output, session) {
       level_colors = prediction_level_colors_state(),
       show_labels = input$pred_show_labels %||% FALSE,
       observed_data = attr(res$data, "observed_prediction_data"),
-      show_observed_points = input$pred_show_observed_points %||% FALSE
+      show_observed_points = input$pred_show_observed_points %||% FALSE,
+      observed_point_jitter = input$pred_observed_jitter %||% TRUE,
+      observed_point_cross = input$pred_observed_cross %||% TRUE
     )
+  }
+
+  output$pred_plot_ui <- renderUI({
+    if (isTRUE(input$pred_interactive_hover)) {
+      if (!requireNamespace("plotly", quietly = TRUE)) {
+        return(helpText("Install the `plotly` package to use interactive hover labels."))
+      }
+      plotly::plotlyOutput("pred_plot_interactive", height = 420)
+    } else {
+      plotOutput("pred_plot_static", height = 420)
+    }
   })
+
+  output$pred_plot_static <- renderPlot({
+    main_prediction_plot()
+  })
+
+  if (requireNamespace("plotly", quietly = TRUE)) {
+    output$pred_plot_interactive <- plotly::renderPlotly({
+      interactive_plot <- plotly::ggplotly(main_prediction_plot(), tooltip = "text")
+      interactive_plot <- plotly::layout(interactive_plot, hovermode = "closest")
+      plotly::config(interactive_plot, displaylogo = FALSE)
+    })
+  }
 
   output$pred_table <- renderDT({
     if (is.null(fit_result())) {
