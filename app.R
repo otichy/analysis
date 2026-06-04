@@ -1131,7 +1131,44 @@ get_model_coefficients <- function(model) {
   stats::coef(model)
 }
 
-get_model_vcov <- function(model) {
+compute_fastglm_vcov <- function(model, x) {
+  weights <- suppressWarnings(as.numeric(model$weights))
+  if (
+    !is.matrix(x) ||
+    length(weights) != nrow(x) ||
+    any(!is.finite(weights)) ||
+    any(weights < 0)
+  ) {
+    return(NULL)
+  }
+
+  out <- tryCatch(
+    solve(crossprod(x, x * weights)),
+    error = function(e) NULL
+  )
+  if (is.null(out) || any(!is.finite(out))) return(NULL)
+
+  dispersion <- suppressWarnings(as.numeric(model$dispersion %||% 1))
+  if (length(dispersion) != 1L || !is.finite(dispersion) || dispersion <= 0) dispersion <- 1
+  out <- out * dispersion
+  dimnames(out) <- list(colnames(x), colnames(x))
+  out
+}
+
+get_model_vcov <- function(model, model_df = NULL) {
+  stored_vcov <- attr(model, "app_vcov", exact = TRUE)
+  if (is.matrix(stored_vcov) && all(is.finite(stored_vcov))) {
+    return(stored_vcov)
+  }
+
+  if (inherits(model, "fastglm") && is.data.frame(model_df)) {
+    fixed_formula <- get_fixed_formula(model)
+    fixed_terms <- delete.response(terms(fixed_formula))
+    x <- model.matrix(fixed_terms, model_df)
+    reconstructed_vcov <- compute_fastglm_vcov(model, x)
+    if (!is.null(reconstructed_vcov)) return(reconstructed_vcov)
+  }
+
   tryCatch(
     as.matrix(vcov(model)),
     error = function(e) {
@@ -1163,6 +1200,7 @@ fit_fastglm_model <- function(frm, model_df, method = 3L, maxit = 100L) {
     maxit = as.integer(maxit)
   )
   attr(model, "app_formula") <- frm
+  attr(model, "app_vcov") <- compute_fastglm_vcov(model, x)
   model
 }
 
@@ -2195,7 +2233,7 @@ compute_predictions <- function(
   mm <- mm[, names(beta), drop = FALSE]
 
   eta <- as.numeric(mm %*% beta)
-  vcv <- get_model_vcov(model)
+  vcv <- get_model_vcov(model, model_df = model_df)
   se_eta <- sqrt(pmax(0, diag(mm %*% vcv %*% t(mm))))
   crit <- qnorm(0.975)
 
@@ -2370,8 +2408,9 @@ normalize_prediction_level_color_store <- function(colors = list()) {
 
   out <- list()
   for (v in names(colors)) {
-    colors_v <- as.character(unlist(colors[[v]], use.names = TRUE))
+    colors_v <- unlist(colors[[v]], use.names = TRUE)
     color_names <- names(colors_v)
+    colors_v <- as.character(colors_v)
     if (length(colors_v) == 0 || is.null(color_names)) next
 
     keep <- !is.na(color_names) & nzchar(color_names) & is_valid_hex_color(colors_v)
@@ -4251,6 +4290,7 @@ build_repro_code <- function(
         "get_model_formula",
         "get_fixed_formula",
         "get_model_coefficients",
+        "compute_fastglm_vcov",
         "get_model_vcov",
         "build_formula",
         "prepare_data",
@@ -4463,6 +4503,19 @@ ui <- fluidPage(
            el.select();
            try { document.execCommand('copy'); } catch (err) {}
          }
+       });
+
+       document.addEventListener('click', function(event) {
+         var button = event.target.closest('.prediction-color-commit');
+         if (!button) return;
+         var colorInput = button.parentElement.querySelector('input[type=\"color\"]');
+         if (!colorInput || !window.Shiny || !Shiny.setInputValue) return;
+         Shiny.setInputValue('prediction_color_commit', {
+           variable: button.getAttribute('data-variable'),
+           level: button.getAttribute('data-level'),
+           color: colorInput.value,
+           nonce: Date.now()
+         }, {priority: 'event'});
        });"
     ))
   ),
@@ -4484,7 +4537,12 @@ ui <- fluidPage(
         fileInput("upload_file", "Upload CSV/XLSX", accept = c(".csv", ".xlsx", ".xls"))
       ),
       tags$hr(),
-      selectInput("response_var", "Dependent variable", choices = NULL, selected = NULL),
+      selectInput(
+        "response_var",
+        "Dependent variable",
+        choices = c("Select a dependent variable" = ""),
+        selected = ""
+      ),
       selectizeInput("fixed_effects", "Fixed effects", choices = NULL, multiple = TRUE),
       selectizeInput("interaction_terms", "Interactions (pairwise among selected fixed effects)", choices = NULL, multiple = TRUE),
       selectInput(
@@ -4841,18 +4899,23 @@ server <- function(input, output, session) {
     fit_backend_selected = NULL
   ) {
     response_specs <- list_response_candidates(df)
-    response_choices <- stats::setNames(
-      vapply(response_specs, `[[`, character(1), "key"),
-      vapply(response_specs, `[[`, character(1), "label")
+    response_choices <- c(
+      "Select a dependent variable" = "",
+      stats::setNames(
+        vapply(response_specs, `[[`, character(1), "key"),
+        vapply(response_specs, `[[`, character(1), "label")
+      )
     )
     selected_response <- if (!is.null(response_selected) && nzchar(response_selected)) {
       response_selected
-    } else if (length(response_specs) > 0) {
-      response_specs[[1]]$key
     } else {
       ""
     }
-    response_spec <- tryCatch(get_response_spec(df, selected_response), error = function(e) NULL)
+    response_spec <- if (nzchar(selected_response)) {
+      tryCatch(get_response_spec(df, selected_response), error = function(e) NULL)
+    } else {
+      NULL
+    }
     if (!is.null(response_spec)) selected_response <- response_spec$key
     excluded_response_cols <- if (!is.null(response_spec)) response_spec$outcome_cols else character(0)
     selected_backend <- coerce_fit_backend(fit_backend_selected %||% (input$fit_backend %||% "glmer"), response_spec)
@@ -4891,7 +4954,7 @@ server <- function(input, output, session) {
       session,
       "response_var",
       choices = response_choices,
-      selected = if (length(response_choices) > 0) selected_response else character(0)
+      selected = selected_response
     )
     current_fixed <- input$fixed_effects %||% character(0)
     if (!identical(current_fixed, fixed_selected)) {
@@ -4941,12 +5004,7 @@ server <- function(input, output, session) {
       state_meta$suppress_settings_save <- FALSE
     }, add = TRUE)
 
-    if (identical(settings$dataset_source, "project") && nzchar(settings$project_file) && settings$project_file %in% project_files) {
-      state_meta$suppress_dataset_source <- TRUE
-      state_meta$suppress_project_file <- TRUE
-      updateRadioButtons(session, "dataset_source", selected = "project")
-      updateSelectInput(session, "project_file", selected = settings$project_file)
-    } else if (identical(settings$dataset_source, "project")) {
+    if (identical(settings$dataset_source, "project")) {
       state_meta$suppress_dataset_source <- TRUE
       updateRadioButtons(session, "dataset_source", selected = "project")
     }
@@ -5186,6 +5244,11 @@ server <- function(input, output, session) {
 
   run_model_fit <- function() {
     fit_backend <- input$fit_backend %||% "glmer"
+    response_key <- input$response_var %||% ""
+    if (!nzchar(response_key)) {
+      showNotification("Select a dependent variable before fitting.", type = "warning", duration = 8)
+      return(invisible(NULL))
+    }
     selected_fixed <- input$fixed_effects %||% character(0)
     selected_random <- input$random_effects %||% character(0)
     valid_interactions <- make_interaction_choices(selected_fixed)
@@ -5202,7 +5265,7 @@ server <- function(input, output, session) {
     if (!nzchar(response_reference_level)) response_reference_level <- NULL
 
     opts <- list(
-      response_key = input$response_var %||% "",
+      response_key = response_key,
       response_reference_level = response_reference_level,
       fixed_effects = selected_fixed,
       interaction_terms = selected_interactions,
@@ -5454,7 +5517,7 @@ server <- function(input, output, session) {
     settings <- app_settings_state()
     sync_variable_inputs(
       active_data(),
-      response_selected = nonempty_or(input$response_var, settings$response_var %||% ""),
+      response_selected = input$response_var %||% "",
       fixed_selected = nonempty_or(input$fixed_effects, settings$fixed_effects %||% character(0)),
       random_selected = nonempty_or(input$random_effects, settings$random_effects %||% character(0)),
       interaction_selected = nonempty_or(input$interaction_terms, settings$interaction_terms %||% character(0)),
@@ -5564,7 +5627,12 @@ server <- function(input, output, session) {
     }
     df <- active_data()
     fx <- input$fixed_effects %||% character(0)
-    response_spec <- tryCatch(get_response_spec(df, input$response_var %||% ""), error = function(e) NULL)
+    response_key <- input$response_var %||% ""
+    response_spec <- if (nzchar(response_key)) {
+      tryCatch(get_response_spec(df, response_key), error = function(e) NULL)
+    } else {
+      NULL
+    }
     settings <- app_settings_state()
 
     controls <- list()
@@ -5848,14 +5916,19 @@ server <- function(input, output, session) {
     source_df <- source_data()
     df <- active_data()
     filters <- normalize_dataset_filters(dataset_filters_state())
-    response_info <- tryCatch(
-      summarize_response_data(
-        df,
-        input$response_var %||% "",
-        input$response_ref %||% NULL
-      ),
-      error = function(e) NULL
-    )
+    response_key <- input$response_var %||% ""
+    response_info <- if (nzchar(response_key)) {
+      tryCatch(
+        summarize_response_data(
+          df,
+          response_key,
+          input$response_ref %||% NULL
+        ),
+        error = function(e) NULL
+      )
+    } else {
+      NULL
+    }
     cat("Source:", current_dataset_display_path(), "\n")
     if (length(filters) > 0) {
       cat("Rows after dataset preprocessing:", nrow(df), "\n")
@@ -5988,10 +6061,12 @@ server <- function(input, output, session) {
   output$class_balance_plot <- renderPlot({
     validate(need(dataset_ready(), "Select a dataset to inspect outcome balance."))
     df <- active_data()
+    response_key <- input$response_var %||% ""
+    validate(need(nzchar(response_key), "Select a dependent variable to inspect outcome balance."))
     response_info <- tryCatch(
       summarize_response_data(
         df,
-        input$response_var %||% "",
+        response_key,
         input$response_ref %||% NULL
       ),
       error = function(e) NULL
@@ -6445,10 +6520,9 @@ server <- function(input, output, session) {
                   ),
                   tags$button(
                     type = "button",
-                    class = "btn btn-default btn-xs",
+                    class = "btn btn-default btn-xs prediction-color-commit",
                     `data-variable` = v,
                     `data-level` = level,
-                    onclick = "var el = this.parentElement.querySelector('input[type=\"color\"]'); if (el && window.Shiny && Shiny.setInputValue) { el.setAttribute('value', el.value); Shiny.setInputValue('prediction_color_commit', {variable: this.dataset.variable, level: this.dataset.level, color: el.value, nonce: Date.now()}, {priority: 'event'}); }",
                     "OK"
                   )
                 )
@@ -6531,7 +6605,7 @@ server <- function(input, output, session) {
     if (!identical(updated, prediction_level_colors_state())) {
       prediction_level_colors_state(updated)
     }
-  }, ignoreInit = TRUE)
+  })
 
   pred_data <- reactive({
     if (is.null(fit_result())) return(NULL)

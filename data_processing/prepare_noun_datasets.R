@@ -24,9 +24,20 @@ output_fields <- c(
 
 period_fields <- c("period_simple", "period_sorted", "period_main")
 
-# Collapse PPCME2 mixed composition/manuscript labels to composition periods
-# for the simplified period view used in downstream analysis.
+# Collapse corpus-specific detailed labels to the simplified period view used
+# in downstream analysis.
 period_simple_map <- c(
+  "?" = "?",
+  "o1" = "o1",
+  "o12" = "o1",
+  "o2" = "o2",
+  "o23" = "o2",
+  "o24" = "o2",
+  "ox2" = "o2",
+  "o3" = "o3",
+  "o34" = "o3",
+  "o4" = "o4",
+  "ox4" = "o4",
   "mx/1" = "m1",
   "m1" = "m1",
   "m2" = "m2",
@@ -44,6 +55,11 @@ period_simple_map <- c(
 )
 
 period_sorted_map <- c(
+  "?" = "a_o?",
+  "o1" = "b_o1",
+  "o2" = "c_o2",
+  "o3" = "d_o3",
+  "o4" = "e_o4",
   "m1" = "e_m1",
   "m2" = "f_m2",
   "m3" = "g_m3",
@@ -55,6 +71,17 @@ period_sorted_map <- c(
 )
 
 period_main_map <- c(
+  "?" = "a_oe",
+  "o1" = "a_oe",
+  "o12" = "a_oe",
+  "o2" = "a_oe",
+  "o23" = "a_oe",
+  "o24" = "a_oe",
+  "ox2" = "a_oe",
+  "o3" = "a_oe",
+  "o34" = "a_oe",
+  "o4" = "a_oe",
+  "ox4" = "a_oe",
   "mx/1" = "b_me",
   "m1" = "b_me",
   "m2" = "b_me",
@@ -72,6 +99,17 @@ period_main_map <- c(
 )
 
 period_alias_map <- c(
+  "?" = "?",
+  "o1" = "o1",
+  "o12" = "o12",
+  "o2" = "o2",
+  "o23" = "o23",
+  "o24" = "o24",
+  "ox2" = "ox2",
+  "o3" = "o3",
+  "o34" = "o34",
+  "o4" = "o4",
+  "ox4" = "ox4",
   "mx1" = "mx/1",
   "mx/1" = "mx/1",
   "m1" = "m1",
@@ -242,6 +280,57 @@ append_missing_period_columns <- function(df, path, fallback_prefix) {
   list(data = df, changed = TRUE, added = missing_period_fields)
 }
 
+normalize_oe_rows <- function(df) {
+  source_name <- "all_OE_nouns.csv"
+  require_columns(
+    df,
+    c(
+      "id",
+      "q_token",
+      "q_lemma",
+      "lemma",
+      "filename",
+      "genre",
+      "dialect",
+      "pde_count",
+      "semantics",
+      "orig",
+      "oe_etymon",
+      "oe_class",
+      "oe_stem",
+      "oe_gender",
+      "period"
+    ),
+    source_name
+  )
+
+  periods <- derive_period_columns(df$period, df$id, "OE")
+
+  data.frame(
+    id = clean_text(df$id),
+    q_token = clean_text(df$q_token),
+    q_lemma = clean_text(df$q_lemma),
+    lemma = clean_text(df$lemma),
+    text = clean_text(df$filename),
+    genre = clean_text(df$genre),
+    dialect = clean_text(df$dialect),
+    plural = rep(NA_integer_, nrow(df)),
+    singular = rep(NA_integer_, nrow(df)),
+    count = clean_text(df$pde_count),
+    semantics = clean_text(df$semantics),
+    orig = clean_text(df$orig),
+    "oe reflex" = clean_text(df$oe_etymon),
+    "oe class" = clean_text(df$oe_class),
+    "oe stem" = clean_text(df$oe_stem),
+    "oe gender" = clean_text(df$oe_gender),
+    period_simple = periods$period_simple,
+    period_sorted = periods$period_sorted,
+    period_main = periods$period_main,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+}
+
 normalize_me_rows <- function(df) {
   source_name <- "all_ME_nouns.csv"
   require_columns(
@@ -351,6 +440,7 @@ normalize_lmode_rows <- function(df) {
 
 parse_args <- function(args) {
   config <- list(
+    oe = "all_OE_nouns.csv",
     me = "all_ME_nouns.csv",
     lmode = "all_LModE_nouns.csv",
     out = "all_nouns_combined.csv"
@@ -363,13 +453,15 @@ parse_args <- function(args) {
       cat(
         paste(
           "Usage:",
-          "  prepare_noun_datasets.R [--me=PATH] [--lmode=PATH] [--out=PATH]",
+          "  prepare_noun_datasets.R [--oe=PATH] [--me=PATH] [--lmode=PATH] [--out=PATH]",
           "  prepare_noun_datasets.R [OUTPUT_PATH]",
           sep = "\n"
         )
       )
       cat("\n")
       quit(save = "no", status = 0)
+    } else if (startsWith(arg, "--oe=")) {
+      config$oe <- sub("^--oe=", "", arg)
     } else if (startsWith(arg, "--me=")) {
       config$me <- sub("^--me=", "", arg)
     } else if (startsWith(arg, "--lmode=")) {
@@ -412,18 +504,33 @@ write_output <- function(df, path) {
 main <- function() {
   args <- parse_args(commandArgs(trailingOnly = TRUE))
 
+  oe_source <- read_semicolon_csv(args$oe)
   me_source <- read_semicolon_csv(args$me)
   lmode_source <- read_semicolon_csv(args$lmode)
 
+  oe_source_update <- append_missing_period_columns(oe_source, args$oe, "OE")
   me_source_update <- append_missing_period_columns(me_source, args$me, "ME")
   lmode_source_update <- append_missing_period_columns(lmode_source, args$lmode, "LModE")
 
+  oe <- normalize_oe_rows(oe_source_update$data)
   me <- normalize_me_rows(me_source_update$data)
   lmode <- normalize_lmode_rows(lmode_source_update$data)
-  combined <- rbind(me[, output_fields], lmode[, output_fields])
+  combined <- rbind(oe[, output_fields], me[, output_fields], lmode[, output_fields])
+
+  expected_rows <- nrow(oe) + nrow(me) + nrow(lmode)
+  if (nrow(combined) != expected_rows) {
+    stop(sprintf("Row count changed while combining noun datasets: expected %d row(s), got %d.", expected_rows, nrow(combined)))
+  }
 
   write_output(combined, args$out)
 
+  if (oe_source_update$changed) {
+    message(sprintf(
+      "Added OE period column(s) to %s: %s",
+      normalize_path_label(args$oe),
+      paste(oe_source_update$added, collapse = ", ")
+    ))
+  }
   if (me_source_update$changed) {
     message(sprintf(
       "Added ME period column(s) to %s: %s",
@@ -438,6 +545,7 @@ main <- function() {
       paste(lmode_source_update$added, collapse = ", ")
     ))
   }
+  message(sprintf("OE rows copied: %d", nrow(oe)))
   message(sprintf("ME rows copied: %d", nrow(me)))
   message(sprintf("LModE rows copied: %d", nrow(lmode)))
   message(sprintf("Total merged rows written: %d", nrow(combined)))
