@@ -2381,8 +2381,9 @@ normalize_prediction_level_colors <- function(level_specs, colors = list()) {
     defaults <- setNames(default_prediction_level_palette(length(levels_v)), levels_v)
     current <- colors[[v]]
     if (!is.null(current)) {
-      current <- as.character(unlist(current, use.names = TRUE))
+      current <- unlist(current, use.names = TRUE)
       current_names <- names(current)
+      current <- as.character(current)
       if (is.null(current_names) && length(current) > 0) {
         current_names <- levels_v[seq_len(min(length(current), length(levels_v)))]
       }
@@ -3950,6 +3951,10 @@ prediction_level_order_store_path <- function() {
   file.path(saved_model_dir(), "prediction_level_orders.rds")
 }
 
+prediction_axis_store_path <- function() {
+  file.path(saved_model_dir(), "prediction_axes.rds")
+}
+
 app_settings_store_path <- function() {
   file.path(saved_model_dir(), "app_settings.rds")
 }
@@ -3985,6 +3990,30 @@ save_prediction_level_order_store <- function(orders) {
     normalize_prediction_level_order_store(orders),
     prediction_level_order_store_path()
   )
+  invisible(TRUE)
+}
+
+normalize_prediction_axis_store <- function(axes = list()) {
+  if (!is.list(axes)) axes <- list()
+  pred_x <- as.character(axes$pred_x %||% "")
+  pred_group <- as.character(axes$pred_group %||% "__none__")
+  list(
+    pred_x = if (length(pred_x) > 0 && nzchar(pred_x[[1]])) pred_x[[1]] else "",
+    pred_group = if (length(pred_group) > 0 && nzchar(pred_group[[1]])) pred_group[[1]] else "__none__"
+  )
+}
+
+load_prediction_axis_store <- function() {
+  path <- prediction_axis_store_path()
+  if (!file.exists(path)) return(normalize_prediction_axis_store(list()))
+  tryCatch(
+    normalize_prediction_axis_store(readRDS(path)),
+    error = function(e) normalize_prediction_axis_store(list())
+  )
+}
+
+save_prediction_axis_store <- function(axes) {
+  saveRDS(normalize_prediction_axis_store(axes), prediction_axis_store_path())
   invisible(TRUE)
 }
 
@@ -4516,6 +4545,43 @@ ui <- fluidPage(
            color: colorInput.value,
            nonce: Date.now()
          }, {priority: 'event'});
+       });
+
+       var predictionLevelDragRow = null;
+       document.addEventListener('dragstart', function(event) {
+         var handle = event.target.closest('.pred-level-handle');
+         if (!handle) return;
+         predictionLevelDragRow = handle.closest('.pred-level-row');
+         if (!predictionLevelDragRow) return;
+         predictionLevelDragRow.classList.add('pred-level-dragging');
+         event.dataTransfer.effectAllowed = 'move';
+         event.dataTransfer.setData('text/plain', predictionLevelDragRow.getAttribute('data-level') || '');
+       });
+
+       document.addEventListener('dragover', function(event) {
+         if (!predictionLevelDragRow) return;
+         var row = event.target.closest('.pred-level-row');
+         if (!row || row === predictionLevelDragRow || row.parentElement !== predictionLevelDragRow.parentElement) return;
+         event.preventDefault();
+         var rect = row.getBoundingClientRect();
+         row.parentElement.insertBefore(predictionLevelDragRow, event.clientY < rect.top + rect.height / 2 ? row : row.nextSibling);
+       });
+
+       document.addEventListener('drop', function(event) {
+         if (!predictionLevelDragRow) return;
+         event.preventDefault();
+         var container = predictionLevelDragRow.parentElement;
+         var order = Array.from(container.querySelectorAll(':scope > .pred-level-row')).map(function(row) {
+           return row.getAttribute('data-level');
+         });
+         if (window.Shiny && Shiny.setInputValue) {
+           Shiny.setInputValue(container.getAttribute('data-order-input'), order, {priority: 'event'});
+         }
+       });
+
+       document.addEventListener('dragend', function() {
+         if (predictionLevelDragRow) predictionLevelDragRow.classList.remove('pred-level-dragging');
+         predictionLevelDragRow = null;
        });"
     ))
   ),
@@ -4647,6 +4713,24 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   app_settings_initial <- load_app_settings_store()
+  prediction_axes_initial <- normalize_prediction_axis_store(
+    if (file.exists(prediction_axis_store_path())) {
+      load_prediction_axis_store()
+    } else {
+      list(
+        pred_x = app_settings_initial$pred_x %||% "",
+        pred_group = app_settings_initial$pred_group %||% "__none__"
+      )
+    }
+  )
+  prediction_level_orders_initial <- merge_prediction_level_order_store(
+    app_settings_initial$pred_level_orders %||% list(),
+    load_prediction_level_order_store()
+  )
+  prediction_level_colors_initial <- merge_prediction_level_color_store(
+    app_settings_initial$pred_level_colors %||% list(),
+    load_prediction_level_color_store()
+  )
   fit_meta <- reactiveValues(
     is_fitting = FALSE,
     last_runtime_sec = NA_real_,
@@ -4658,16 +4742,11 @@ server <- function(input, output, session) {
   dataset_override <- reactiveVal(NULL)
   dataset_filters_state <- reactiveVal(app_settings_initial$dataset_filters %||% list())
   filter_target_column <- reactiveVal(NULL)
-  prediction_level_order_store_state <- reactiveVal(merge_prediction_level_order_store(
-    load_prediction_level_order_store(),
-    app_settings_initial$pred_level_orders %||% list()
-  ))
-  prediction_level_orders_state <- reactiveVal(app_settings_initial$pred_level_orders %||% list())
-  prediction_level_color_store_state <- reactiveVal(merge_prediction_level_color_store(
-    load_prediction_level_color_store(),
-    app_settings_initial$pred_level_colors %||% list()
-  ))
-  prediction_level_colors_state <- reactiveVal(app_settings_initial$pred_level_colors %||% list())
+  prediction_level_order_store_state <- reactiveVal(prediction_level_orders_initial)
+  prediction_level_orders_state <- reactiveVal(prediction_level_orders_initial)
+  prediction_level_color_store_state <- reactiveVal(prediction_level_colors_initial)
+  prediction_level_colors_state <- reactiveVal(prediction_level_colors_initial)
+  prediction_axis_selection_state <- reactiveVal(prediction_axes_initial)
   app_settings_state <- reactiveVal(app_settings_initial)
   state_meta <- reactiveValues(
     is_restoring = FALSE,
@@ -4680,7 +4759,8 @@ server <- function(input, output, session) {
     suppress_active_data = FALSE,
     suppress_response_var = FALSE,
     suppress_fixed_effects = FALSE,
-    suppress_fit_backend = FALSE
+    suppress_fit_backend = FALSE,
+    clear_model_variables_on_active_data = TRUE
   )
   auto_fit_pending <- reactiveVal(FALSE)
   queued_fit_request <- reactiveVal(NULL)
@@ -4720,8 +4800,8 @@ server <- function(input, output, session) {
       reference_levels = reference_levels,
       compute_lrt = isTRUE(input$compute_lrt),
       dataset_filters = dataset_filters_state(),
-      pred_x = input$pred_x %||% "",
-      pred_group = input$pred_group %||% "__none__",
+      pred_x = prediction_axis_selection_state()$pred_x,
+      pred_group = prediction_axis_selection_state()$pred_group,
       pred_chart_type = input$pred_chart_type %||% "line",
       pred_show_labels = isTRUE(input$pred_show_labels),
       pred_show_observed_points = isTRUE(input$pred_show_observed_points),
@@ -4926,18 +5006,14 @@ server <- function(input, output, session) {
       c(excluded_response_cols, "plural_successes", "plural_failures", "response_value", ".case_weight")
     )
 
-    default_fixed <- intersect(c("period_simple", "semantics"), candidate_vars)
-    if (length(default_fixed) == 0 && length(candidate_vars) > 0) default_fixed <- candidate_vars[1]
-
     default_random <- if (identical(selected_backend, "fastglm")) {
       character(0)
     } else {
       intersect("lemma", candidate_vars)
     }
 
-    fixed_selected <- fixed_selected %||% default_fixed
+    fixed_selected <- fixed_selected %||% character(0)
     fixed_selected <- intersect(fixed_selected, candidate_vars)
-    if (length(fixed_selected) == 0 && length(candidate_vars) > 0) fixed_selected <- candidate_vars[1]
 
     random_selected <- random_selected %||% default_random
     random_selected <- intersect(random_selected, candidate_vars)
@@ -5050,6 +5126,7 @@ server <- function(input, output, session) {
     )
 
     state_meta$is_restoring <- TRUE
+    state_meta$clear_model_variables_on_active_data <- FALSE
     on.exit({
       state_meta$is_restoring <- FALSE
     }, add = TRUE)
@@ -5090,6 +5167,12 @@ server <- function(input, output, session) {
     fit_result(res)
     prediction_level_orders_state(normalized_prediction_level_orders(res, state$pred_level_orders %||% list()))
     prediction_level_colors_state(normalized_prediction_level_colors(res, state$pred_level_colors %||% list()))
+    restored_axes <- normalize_prediction_axis_store(list(
+      pred_x = state$pred_x %||% (res$fixed_effects[1] %||% ""),
+      pred_group = state$pred_group %||% "__none__"
+    ))
+    prediction_axis_selection_state(restored_axes)
+    tryCatch(save_prediction_axis_store(restored_axes), error = function(e) invisible(FALSE))
 
     tryCatch(
       persist_fit_state(
@@ -5483,6 +5566,7 @@ server <- function(input, output, session) {
     dataset_override(NULL)
     dataset_filters_state(normalize_dataset_filters((app_settings_state() %||% list())$dataset_filters %||% list()))
     state_meta$loaded_display_path <- NULL
+    state_meta$clear_model_variables_on_active_data <- TRUE
   }, ignoreInit = TRUE)
 
   observeEvent(input$project_file, {
@@ -5495,6 +5579,7 @@ server <- function(input, output, session) {
     dataset_override(NULL)
     dataset_filters_state(normalize_dataset_filters((app_settings_state() %||% list())$dataset_filters %||% list()))
     state_meta$loaded_display_path <- NULL
+    state_meta$clear_model_variables_on_active_data <- TRUE
   }, ignoreInit = TRUE)
 
   observeEvent(input$upload_file, {
@@ -5507,6 +5592,7 @@ server <- function(input, output, session) {
     dataset_override(NULL)
     dataset_filters_state(normalize_dataset_filters((app_settings_state() %||% list())$dataset_filters %||% list()))
     state_meta$loaded_display_path <- NULL
+    state_meta$clear_model_variables_on_active_data <- TRUE
   }, ignoreInit = TRUE)
 
   observeEvent(active_data(), {
@@ -5515,10 +5601,12 @@ server <- function(input, output, session) {
       return(invisible(NULL))
     }
     settings <- app_settings_state()
+    clear_model_variables <- isTRUE(state_meta$clear_model_variables_on_active_data)
+    state_meta$clear_model_variables_on_active_data <- FALSE
     sync_variable_inputs(
       active_data(),
-      response_selected = input$response_var %||% "",
-      fixed_selected = nonempty_or(input$fixed_effects, settings$fixed_effects %||% character(0)),
+      response_selected = if (clear_model_variables) "" else input$response_var %||% "",
+      fixed_selected = if (clear_model_variables) character(0) else input$fixed_effects %||% character(0),
       random_selected = nonempty_or(input$random_effects, settings$random_effects %||% character(0)),
       interaction_selected = nonempty_or(input$interaction_terms, settings$interaction_terms %||% character(0)),
       fit_backend_selected = nonempty_or(input$fit_backend, settings$fit_backend %||% "glmer")
@@ -6416,6 +6504,7 @@ server <- function(input, output, session) {
     if (length(fx) == 0) return(helpText("No fixed effects available for predictions."))
     response_info <- normalize_response_info(res$response_info %||% attr(res$data, "response_info"))
     chart_choices <- c("Line" = "line", "Bar" = "bar", "Violin" = "violin")
+    axes <- prediction_axis_selection_state()
 
     default_x <- if ("period_simple" %in% fx) "period_simple" else fx[1]
     default_group <- if ("semantics" %in% fx && "semantics" != default_x) {
@@ -6425,14 +6514,28 @@ server <- function(input, output, session) {
     } else {
       "__none__"
     }
+    saved_x <- as.character(axes$pred_x %||% "")
+    selected_x <- if (length(saved_x) > 0 && saved_x[[1]] %in% fx) saved_x[[1]] else default_x
+    saved_group <- as.character(axes$pred_group %||% "__none__")
+    selected_group <- if (
+      length(saved_group) > 0 &&
+      saved_group[[1]] %in% c("__none__", fx) &&
+      !identical(saved_group[[1]], selected_x)
+    ) {
+      saved_group[[1]]
+    } else if (!identical(default_group, selected_x)) {
+      default_group
+    } else {
+      "__none__"
+    }
 
     tagList(
-      selectInput("pred_x", "Prediction x variable", choices = fx, selected = default_x),
+      selectInput("pred_x", "Prediction x variable", choices = fx, selected = selected_x),
       selectInput(
         "pred_group",
         "Prediction group/color variable (optional)",
         choices = c("None" = "__none__", fx),
-        selected = default_group
+        selected = selected_group
       ),
       radioButtons(
         "pred_chart_type",
@@ -6474,15 +6577,14 @@ server <- function(input, output, session) {
     tagList(
       tags$p(
         style = "margin-bottom: 0.5rem;",
-        "Drag rows to reorder prediction levels. Colors and order are reused in the main Predictions chart and the individual fixed-effect charts."
+        "Drag rows to reorder prediction levels. Colors and order are saved by variable and level name for future app sessions and reused in the main Predictions chart and the individual fixed-effect charts."
       ),
       lapply(names(specs), function(v) {
         levels_v <- order_state[[v]]
         container_id <- prediction_level_order_container_id(v)
         order_input_id <- prediction_level_order_input_id(v)
-        details_id <- paste0(container_id, "_details")
         tags$details(
-          id = details_id,
+          id = paste0(container_id, "_details"),
           style = "margin-bottom: 0.85rem;",
           tags$summary(
             style = "cursor: pointer; font-weight: 600; margin-bottom: 0.35rem;",
@@ -6490,11 +6592,13 @@ server <- function(input, output, session) {
           ),
           tags$div(
             id = container_id,
+            `data-order-input` = order_input_id,
             style = "display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.45rem;",
             lapply(levels_v, function(level) {
               input_id <- prediction_color_input_id(v, level)
               level_color <- unname(color_state[[v]][level])
               tags$div(
+                class = "pred-level-row",
                 `data-level` = level,
                 style = paste(
                   "display: flex; align-items: center; justify-content: space-between;",
@@ -6505,7 +6609,8 @@ server <- function(input, output, session) {
                   style = "display: inline-flex; align-items: center; gap: 0.55rem;",
                   tags$span(
                     class = "pred-level-handle",
-                    style = "cursor: move; color: #666; font-weight: 600; letter-spacing: 0.08em;",
+                    draggable = "true",
+                    style = "cursor: move; color: #666; font-weight: 600; letter-spacing: 0.08em; user-select: none;",
                     "|||"
                   ),
                   tags$span(level)
@@ -6528,39 +6633,7 @@ server <- function(input, output, session) {
                 )
               )
             })
-          ),
-          tags$script(HTML(sprintf(
-            "(function() {
-               var details = document.getElementById('%s');
-               var el = $('#%s');
-               if (!el.length || !$.fn.sortable) return;
-               var pushOrder = function() {
-                 var order = el.children('[data-level]').map(function() {
-                   return $(this).attr('data-level');
-                 }).get();
-                 if (window.Shiny && Shiny.setInputValue) {
-                   Shiny.setInputValue('%s', order, {priority: 'event'});
-                 }
-               };
-               var initSortable = function() {
-                 try { el.sortable('destroy'); } catch (err) {}
-                 el.sortable({
-                   axis: 'y',
-                   handle: '.pred-level-handle',
-                   update: pushOrder
-                 });
-                 pushOrder();
-               };
-               initSortable();
-               if (details && !details.dataset.predLevelBound) {
-                 details.dataset.predLevelBound = '1';
-                 details.addEventListener('toggle', initSortable);
-               }
-             })();",
-            details_id,
-            container_id,
-            order_input_id
-          )))
+          )
         )
       })
     )
@@ -6568,6 +6641,7 @@ server <- function(input, output, session) {
 
   observe({
     specs <- prediction_level_specs()
+    if (length(specs) == 0) return(invisible(NULL))
     updated <- normalize_prediction_level_orders(specs, prediction_level_orders_state())
     for (v in names(specs)) {
       order_val <- input[[prediction_level_order_input_id(v)]]
@@ -6578,6 +6652,8 @@ server <- function(input, output, session) {
 
     if (!identical(updated, prediction_level_orders_state())) {
       prediction_level_orders_state(updated)
+      persist_prediction_level_order_store(updated)
+      merge_app_settings(list(pred_level_orders = updated))
     }
   })
 
@@ -6604,6 +6680,8 @@ server <- function(input, output, session) {
 
     if (!identical(updated, prediction_level_colors_state())) {
       prediction_level_colors_state(updated)
+      persist_prediction_level_color_store(updated)
+      merge_app_settings(list(pred_level_colors = updated))
     }
   })
 
@@ -6647,6 +6725,27 @@ server <- function(input, output, session) {
   observeEvent(list(input$pred_x, input$pred_group, input$pred_chart_type, input$pred_show_labels, input$pred_show_observed_points, input$pred_observed_jitter, input$pred_observed_cross, input$pred_interactive_hover), {
     res <- fit_result()
     if (is.null(res) || !is.null(res$error)) return(invisible(NULL))
+    if (!isTRUE(state_meta$is_restoring) && !isTRUE(state_meta$is_applying_settings)) {
+      axes <- normalize_prediction_axis_store(list(
+        pred_x = input$pred_x %||% "",
+        pred_group = input$pred_group %||% "__none__"
+      ))
+      prediction_axis_selection_state(axes)
+      tryCatch(
+        save_prediction_axis_store(axes),
+        error = function(e) {
+          showNotification(
+            paste("Saving prediction axes failed:", e$message),
+            type = "warning",
+            duration = 8
+          )
+        }
+      )
+      merge_app_settings(list(
+        pred_x = axes$pred_x,
+        pred_group = axes$pred_group
+      ))
+    }
     persist_fit_state(res = res)
   }, ignoreInit = TRUE)
 

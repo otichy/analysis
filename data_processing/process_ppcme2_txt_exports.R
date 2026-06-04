@@ -1,9 +1,24 @@
 #!/usr/bin/env Rscript
 
-input_pattern <- "ppcme2/*.txt"
-meta_file <- "meta.csv"
-q_lemma_file <- "Q lemma.xlsx"
-default_output_file <- "all_ME_nouns.csv"
+get_script_dir <- function() {
+  file_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+  if (length(file_arg) > 0) {
+    return(dirname(normalizePath(sub("^--file=", "", file_arg[[1]]), mustWork = TRUE)))
+  }
+
+  source_file <- tryCatch(sys.frames()[[1]]$ofile, error = function(e) NULL)
+  if (!is.null(source_file)) {
+    return(dirname(normalizePath(source_file, mustWork = TRUE)))
+  }
+
+  normalizePath(getwd(), mustWork = TRUE)
+}
+
+script_dir <- get_script_dir()
+input_pattern <- file.path(script_dir, "Q_ppcme2", "*.txt")
+meta_file <- file.path(script_dir, "meta.csv")
+q_lemma_file <- file.path(script_dir, "Q lemma.xlsx")
+default_output_file <- file.path(script_dir, "all_ME_nouns.csv")
 
 args <- commandArgs(trailingOnly = TRUE)
 output_file <- if (length(args) >= 1 && nzchar(args[[1]])) args[[1]] else default_output_file
@@ -129,17 +144,24 @@ read_q_lemma_map <- function(path) {
     )
   }
 
-  duplicate_words <- unique(mapping$word[duplicated(mapping$word)])
-  if (length(duplicate_words) > 0) {
+  grouped <- split(mapping$lemma, mapping$word)
+  conflicting_words <- names(grouped)[vapply(grouped, function(values) {
+    length(unique(values)) > 1
+  }, logical(1))]
+  if (length(conflicting_words) > 0) {
+    details <- vapply(head(conflicting_words, 10), function(word) {
+      sprintf("%s -> %s", word, paste(unique(grouped[[word]]), collapse = " / "))
+    }, character(1))
     stop(
       sprintf(
-        "Duplicate word values found in %s: %s",
+        "Conflicting duplicate word mapping(s) found in %s: %s",
         normalizePath(path, winslash = "/", mustWork = FALSE),
-        paste(head(sort(duplicate_words), 10), collapse = ", ")
+        paste(details, collapse = "; ")
       )
     )
   }
 
+  mapping <- mapping[!duplicated(mapping$word), , drop = FALSE]
   stats::setNames(mapping$lemma, mapping$word)
 }
 

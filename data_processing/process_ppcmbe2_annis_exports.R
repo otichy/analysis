@@ -1,8 +1,23 @@
 #!/usr/bin/env Rscript
 
-input_pattern <- "ppcmbe2/all_LModE_nouns.csv"
-meta_file <- "meta.csv"
-default_output_file <- "all_LModE_nouns.csv"
+get_script_dir <- function() {
+  file_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+  if (length(file_arg) > 0) {
+    return(dirname(normalizePath(sub("^--file=", "", file_arg[[1]]), mustWork = TRUE)))
+  }
+
+  source_file <- tryCatch(sys.frames()[[1]]$ofile, error = function(e) NULL)
+  if (!is.null(source_file)) {
+    return(dirname(normalizePath(source_file, mustWork = TRUE)))
+  }
+
+  normalizePath(getwd(), mustWork = TRUE)
+}
+
+script_dir <- get_script_dir()
+input_pattern <- file.path(script_dir, "Q_ppcmbe2", "all_LModE_nouns.csv")
+meta_file <- file.path(script_dir, "meta.csv")
+default_output_file <- file.path(script_dir, "all_LModE_nouns.csv")
 
 args <- commandArgs(trailingOnly = TRUE)
 output_file <- if (length(args) >= 1 && nzchar(args[[1]])) args[[1]] else default_output_file

@@ -1,5 +1,21 @@
 #!/usr/bin/env Rscript
 
+get_script_dir <- function() {
+  file_arg <- grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)
+  if (length(file_arg) > 0) {
+    return(dirname(normalizePath(sub("^--file=", "", file_arg[[1]]), mustWork = TRUE)))
+  }
+
+  source_file <- tryCatch(sys.frames()[[1]]$ofile, error = function(e) NULL)
+  if (!is.null(source_file)) {
+    return(dirname(normalizePath(source_file, mustWork = TRUE)))
+  }
+
+  normalizePath(getwd(), mustWork = TRUE)
+}
+
+script_dir <- get_script_dir()
+
 output_fields <- c(
   "id",
   "q_token",
@@ -440,10 +456,10 @@ normalize_lmode_rows <- function(df) {
 
 parse_args <- function(args) {
   config <- list(
-    oe = "all_OE_nouns.csv",
-    me = "all_ME_nouns.csv",
-    lmode = "all_LModE_nouns.csv",
-    out = "all_nouns_combined.csv"
+    oe = file.path(script_dir, "all_OE_nouns.csv"),
+    me = file.path(script_dir, "all_ME_nouns.csv"),
+    lmode = file.path(script_dir, "all_LModE_nouns.csv"),
+    out = file.path(script_dir, "all_nouns_combined.csv")
   )
 
   positional <- character(0)
