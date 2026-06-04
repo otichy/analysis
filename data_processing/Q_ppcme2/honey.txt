@@ -1,0 +1,2 @@
+1_id	1_span	1_anno_ptb:pos	1_meta_Author	1_meta_Dialect	1_meta_File_name	1_meta_Foreign_original	1_meta_Period	1_meta_Prototypicaltext_category	1_meta_Relationship_to_spoken_language	1_meta_Verse_or_prose	2_id	2_span	2_anno_ptb:cat	3_id	3_span	3_anno_ptb:cat	4_id	4_span	4_anno_ptb:pos	5_id	5_span	5_anno_ptb:pos	6_id	6_span	6_anno_ptb:cat	7_id	7_span	7_anno_ptb:cat
+17202688	eny	Q	X	SL	CMAELR3	LATIN	M2/3	INSTR REL	WRITTEN	PROSE	17202687	+tan eny hony	PP	17202689	eny hony	NP	17202690	hony	N	17202690	hony	N	17202689	eny hony	NP	17202689	eny hony	NP
